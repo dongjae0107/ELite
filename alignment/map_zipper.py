@@ -8,8 +8,9 @@ from tqdm import tqdm
 from utils.session import Session
 from utils.session_map import SessionMap
 from utils.logger import logger
+from alignment.init_rt_finder import InitRTFinder
 from alignment.matcher.open3d_scan_matcher import Open3DScanMatcher
-from alignment.matcher.pygicp_scan_matcher import PyGICPScanMatcher
+#from alignment.matcher.pygicp_scan_matcher import PyGICPScanMatcher
 from alignment.global_registration import register_with_fpfh_ransac
 
 
@@ -21,7 +22,8 @@ class MapZipper:
         # Load parameters and initialize data loaders
         with open(config_path, 'r') as f:
             self.params = yaml.safe_load(f)
-
+            
+        #self.matcher_cls = Open3DScanMatcher
         matcher_name = self.params["alignment"].get("matcher", "Open3DScanMatcher")
         self.matcher_cls = {"Open3DScanMatcher": Open3DScanMatcher,
                             "PyGICPScanMatcher": PyGICPScanMatcher,
@@ -66,11 +68,29 @@ class MapZipper:
         return pcd.crop(aabb)
 
     def _init_transform(self) -> np.ndarray:
-        p = self.params["alignment"]
-        init_tf = np.eye(4)
-        if "init_transform" in p:
-            init_tf = np.array(p["init_transform"]).reshape(4, 4)
-        return init_tf
+        p_align = self.params["alignment"]
+        p_settings = self.params["settings"]
+        
+        init_tf = np.array(p_align.get("init_transform", np.eye(4))).reshape(4, 4)
+        is_identity = np.allclose(init_tf, np.eye(4))
+
+        if not is_identity:
+            return init_tf
+
+        prev_out = p_settings.get("prev_output_dir", "")
+        if prev_out and os.path.exists(prev_out):
+            logger.info("Cannot find config initTF. Executing Kiss-Matcher based initTF finder.")
+            prev_scans = os.path.join(os.path.dirname(prev_out.rstrip('/')), "Scans")
+            f_params = copy.deepcopy(self.params)
+            f_params["settings"]["prev_scans_dir"] = prev_scans
+            
+            try:
+                finder = InitRTFinder(f_params)
+                return finder.find_initial_transform()
+            except Exception as e:
+                logger.error(f"InitRTFinder Error: {e}")
+        logger.warning("Failed to find initTF: use identity instead.")
+        return np.eye(4)
 
     def _is_nonoverlapping(self, point: np.ndarray, threshold: float) -> bool:
         # Nearest-neighbor distance test
